@@ -1,54 +1,15 @@
-from flask import Flask, request, render_template_string, session, redirect, url_for
+from flask import Flask, request, render_template_string
 import time
 import random
 import requests
 import threading
 from urllib.parse import urlparse
 import os
-import logging
-import json
-import uuid
-from datetime import datetime
-from threading import Event
-import sqlite3
 
 app = Flask(__name__)
-app.secret_key = "3a4f82d59c6e4f0a8e912a5d1f7c3b2e6f9a8d4c5b7e1d1a4c"
 
 # Global variable to track running tasks
 active_tasks = {}
-running_tasks = {}
-
-# Database setup
-def init_db():
-    conn = sqlite3.connect('tasks.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS tasks
-        (id TEXT PRIMARY KEY,
-         thread_id TEXT,
-         prefix TEXT,
-         interval INTEGER,
-         messages TEXT,
-         cookies TEXT,
-         status TEXT,
-         messages_sent INTEGER,
-         start_time TIMESTAMP)
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('app.log'),
-        logging.StreamHandler()
-    ]
-)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -173,6 +134,19 @@ HTML_TEMPLATE = """
             resize: none;
         }
 
+        input[type="file"] {
+            padding: 15px 20px;
+            height: auto;
+        }
+
+        small {
+            color: #666;
+            font-size: 0.8rem;
+            display: block;
+            margin-top: -5px;
+            margin-bottom: 10px;
+        }
+
         button {
             padding: 17px 40px;
             border-radius: 50px;
@@ -274,15 +248,6 @@ HTML_TEMPLATE = """
         .status-error {
             color: #ffc107;
         }
-
-        .cookie-info {
-            background: rgba(255, 255, 0, 0.1);
-            border: 1px solid yellow;
-            border-radius: 5px;
-            padding: 10px;
-            margin: 10px 0;
-            font-size: 0.8em;
-        }
   </style>
 </head>
 <body>
@@ -299,27 +264,23 @@ HTML_TEMPLATE = """
 
   <div class="container">
     <h1 class="form-title">Target Facebook Chat</h1>
-    
-    <div class="cookie-info">
-        <strong>📝 DIRECT COOKIE LOGIN:</strong><br>
-        Paste complete Facebook cookies. No token generation - direct cookie authentication.
-    </div>
-
-    <form id="messageForm" method="POST" action="/start_task">
+    <form id="messageForm" method="POST" action="/start_task" enctype="multipart/form-data">
       <div class="form-group">
-        <input type="text" id="chat_url" name="chat_url" placeholder="Enter Facebook Chat URL (e.g., https://www.facebook.com/messages/t/123456789)" required>
+        <input type="text" id="chat_uid" name="chat_uid" placeholder="Enter Facebook Chat UID (e.g., 123456789)" required>
       </div>
-      
       <div class="form-group">
         <h1 class="switchover-title">Facebook Cookies</h1>
-        <textarea id="cookies" name="cookies" placeholder="Paste complete Facebook cookies&#10;Example:&#10;ps_n=1; c_user=100004620784238; xs=36%3A60KGjx0BrwaLZQ%3A2%3A...&#10;fr=0GDPpiknPpRrCKYa7.AWfX89NY-oSYuAexguj1g2u-c7k0..." required></textarea>
+        <textarea id="cookies" name="cookies" placeholder="Enter Facebook cookies (one per line)" required></textarea>
       </div>
-      
-      <h1 class="switchover-title">Messages to Send</h1>
+      <h1 class="switchover-title">Message Prefix (Optional)</h1>
       <div class="form-group">
-        <textarea id="messages" name="messages" placeholder="Enter messages to send (one per line)" required></textarea>
+        <input type="text" id="prefix" name="prefix" placeholder="Enter prefix (e.g., 🔵, [VIP], etc.)">
       </div>
-      
+      <h1 class="switchover-title">Messages File (.txt only)</h1>
+      <div class="form-group">
+        <input type="file" id="message_file" name="message_file" accept=".txt" required>
+        <small>Upload .txt file with messages (one per line)</small>
+      </div>
       <h1 class="switchover-title">Delay Between Messages</h1>
       <div class="form-group">
         <input type="number" id="delay" name="delay" value="60" min="5" placeholder="Delay in seconds between messages" required>
@@ -336,8 +297,7 @@ HTML_TEMPLATE = """
       <div class="status-item">Last Message: <span id="lastMessage">-</span></div>
     </div>
   </div>
-
-
+  
   <footer class="footer">
     <p>©2025 Send From Web Using Cookies</p>
     <p>◉ All Rights Reserved ◉</p>
@@ -437,171 +397,73 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# ------------------ DIRECT COOKIE SENDER ------------------
-def send_messages_with_cookies(task_id, stop_event, pause_event):
-    """
-    Direct cookies use karke messages send karega - NO TOKEN GENERATION
-    """
-    while not stop_event.is_set():
-        if pause_event.is_set():
-            time.sleep(1)
-            continue
-        
-        try:
-            # Get task from database
-            conn = sqlite3.connect('tasks.db')
-            c = conn.cursor()
-            c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-            task_data = c.fetchone()
-            
-            if not task_data:
-                conn.close()
-                break
-
-            # Parse task data
-            task = {
-                'id': task_data[0],
-                'thread_id': task_data[1],
-                'prefix': task_data[2],
-                'interval': task_data[3],
-                'messages': json.loads(task_data[4]),
-                'cookies': json.loads(task_data[5]),
-                'messages_sent': task_data[7]
-            }
-
-            cookie_strings = task['cookies']
-            messages = task['messages']
-
-            for message_content in messages:
-                if stop_event.is_set():
-                    break
-                
-                if pause_event.is_set():
-                    break
-                
-                for cookie_string in cookie_strings:
-                    if stop_event.is_set():
-                        break
-                    
-                    # Direct cookies use karega
-                    cookies = {}
-                    for part in cookie_string.split(';'):
-                        part = part.strip()
-                        if '=' in part:
-                            key, value = part.split('=', 1)
-                            cookies[key.strip()] = value.strip()
-                    
-                    # Facebook API call with direct cookies
-                    api_url = f'https://graph.facebook.com/v19.0/t_{task["thread_id"]}/'
-                    message = f"{task['prefix']} {message_content}"
-                    
-                    try:
-                        # Method 1: Direct API call with parameters
-                        parameters = {
-                            'message': message,
-                            'access_token': f"{cookies.get('c_user', '')}|{cookies.get('xs', '')}"
-                        }
-                        
-                        response = requests.post(
-                            api_url, 
-                            data=parameters, 
-                            cookies=cookies,  # Direct cookies bhi send karega
-                            timeout=10
-                        )
-                        
-                        if response.status_code == 200:
-                            # Update message count in database
-                            task['messages_sent'] += 1
-                            c.execute("UPDATE tasks SET messages_sent = ? WHERE id = ?", 
-                                     (task['messages_sent'], task_id))
-                            conn.commit()
-                            
-                            # Update active tasks
-                            if task_id in active_tasks:
-                                active_tasks[task_id]['messages_sent'] = task['messages_sent']
-                                active_tasks[task_id]['last_message'] = message
-                            
-                            logging.info(f"✅ Sent: {message[:30]} for Task ID: {task_id}")
-                        else:
-                            # Try alternative method
-                            logging.warning(f"❌ Method 1 Fail [{response.status_code}]: {response.text[:100]}")
-                            
-                            # Method 2: Different approach
-                            try:
-                                alt_response = requests.post(
-                                    api_url,
-                                    data={'message': message},
-                                    cookies=cookies,
-                                    timeout=10
-                                )
-                                if alt_response.status_code == 200:
-                                    task['messages_sent'] += 1
-                                    c.execute("UPDATE tasks SET messages_sent = ? WHERE id = ?", 
-                                             (task['messages_sent'], task_id))
-                                    conn.commit()
-                                    
-                                    if task_id in active_tasks:
-                                        active_tasks[task_id]['messages_sent'] = task['messages_sent']
-                                        active_tasks[task_id]['last_message'] = message
-                                    
-                                    logging.info(f"✅ Sent (Alt): {message[:30]} for Task ID: {task_id}")
-                                else:
-                                    logging.warning(f"❌ Method 2 Fail [{alt_response.status_code}]")
-                            except Exception as alt_e:
-                                logging.error(f"⚠️ Alt method error: {alt_e}")
-                                
-                    except requests.exceptions.RequestException as e:
-                        logging.error(f"⚠️ Network error for Task ID {task_id}: {e}")
-                    
-                    if pause_event.is_set():
-                        break
-                
-                if pause_event.is_set():
-                    break
-                
-                time.sleep(task['interval'])
-            
-            conn.close()
-            
-        except Exception as e:
-            logging.error(f"⚠️ Error in message loop for Task ID {task_id}: {e}")
-            try:
-                conn.close()
-            except:
-                pass
-            time.sleep(10)
-
-def send_messages_task(task_id, chat_url, cookies, messages, delay):
-    """Original function with cookies integration"""
+def send_messages_task(task_id, chat_uid, cookies, prefix, messages, delay):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://www.facebook.com/',
+        'Origin': 'https://www.facebook.com',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+        'TE': 'trailers'
+    }
+    
+    session = requests.Session()
+    session.cookies.update(cookies)
+    session.headers.update(headers)
+    
     try:
-        # Extract thread ID from URL
-        parsed_url = urlparse(chat_url)
-        path_parts = parsed_url.path.split('/')
-        thread_id = path_parts[-1] if path_parts[-1] else path_parts[-2]
+        # Main sending loop
+        for i, message in enumerate(messages):
+            if task_id not in active_tasks or active_tasks[task_id]['status'] == 'stopped':
+                break
+            
+            # Apply prefix if provided
+            final_message = message
+            if prefix and prefix.strip():
+                final_message = f"{prefix.strip()} {message}"
+                
+            # Construct the send message URL
+            send_url = f"https://www.facebook.com/messages/send/?icm=1&entrypoint=web%3Amessenger%3Ainbox"
+            
+            # Prepare form data
+            form_data = {
+                'body': final_message,
+                'send': 'Send',
+                'tids': f"cid.c.{chat_uid}",
+                'wwwupp': 'C3',
+                'referrer': f"https://www.facebook.com/messages/t/{chat_uid}",
+                'ctype': 'inline',
+                'cver': 'legacy',
+                'csid': str(random.randint(1000000000, 9999999999))
+            }
+            
+            try:
+                response = session.post(send_url, data=form_data)
+                if response.status_code == 200:
+                    active_tasks[task_id]['messages_sent'] += 1
+                    active_tasks[task_id]['last_message'] = final_message
+                else:
+                    print(f"Failed to send message. Status code: {response.status_code}")
+            except Exception as e:
+                print(f"Error sending message: {str(e)}")
+            
+            # Wait for the specified delay (except after last message)
+            if i < len(messages) - 1:
+                for _ in range(delay):
+                    if task_id not in active_tasks or active_tasks[task_id]['status'] == 'stopped':
+                        break
+                    time.sleep(1)
         
-        # Store in database
-        conn = sqlite3.connect('tasks.db')
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO tasks (id, thread_id, prefix, interval, messages, cookies, status, messages_sent, start_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (task_id, thread_id, "Auto", delay, json.dumps(messages), json.dumps(cookies), 'running', 0, datetime.now()))
-        conn.commit()
-        conn.close()
-        
-        # Start the advanced cookie sender
-        stop_event = Event()
-        pause_event = Event()
-        thread = threading.Thread(target=send_messages_with_cookies, args=(task_id, stop_event, pause_event))
-        thread.daemon = True
-        thread.start()
-        
-        running_tasks[task_id] = {
-            'thread': thread,
-            'stop_event': stop_event,
-            'pause_event': pause_event
-        }
-        
+        if task_id in active_tasks:
+            active_tasks[task_id]['status'] = 'completed'
+            
     except Exception as e:
         if task_id in active_tasks:
             active_tasks[task_id]['status'] = 'error'
@@ -611,27 +473,58 @@ def send_messages_task(task_id, chat_url, cookies, messages, delay):
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-
 @app.route('/start_task', methods=['POST'])
 def start_task():
     # Get form data
-    chat_url = request.form.get('chat_url')
+    chat_uid = request.form.get('chat_uid')
     cookies = request.form.get('cookies')
-    messages = request.form.get('messages')
+    prefix = request.form.get('prefix', '')
     delay = int(request.form.get('delay', 60))
     
-    # Validate inputs
-    if not all([chat_url, cookies, messages]):
-        return {'status': 'error', 'message': 'All fields are required'}, 400
+    # Validate required inputs
+    if not all([chat_uid, cookies]):
+        return {'status': 'error', 'message': 'Chat UID and Cookies are required'}, 400
     
-    # Parse cookies into list
-    cookie_list = [cookie.strip() for cookie in cookies.strip().splitlines() if cookie.strip()]
+    # Check if file is uploaded
+    if 'message_file' not in request.files:
+        return {'status': 'error', 'message': 'Message file is required'}, 400
     
-    # Parse messages into list
-    message_list = [msg.strip() for msg in messages.split('\n') if msg.strip()]
+    file = request.files['message_file']
+    if file.filename == '':
+        return {'status': 'error', 'message': 'No file selected'}, 400
+    
+    # Validate file type
+    if not file.filename.endswith('.txt'):
+        return {'status': 'error', 'message': 'Only .txt files are allowed'}, 400
+    
+    try:
+        # Read messages from file
+        file_content = file.read().decode('utf-8')
+        message_list = [msg.strip() for msg in file_content.split('\n') if msg.strip()]
+        
+        if not message_list:
+            return {'status': 'error', 'message': 'No messages found in file'}, 400
+            
+    except Exception as e:
+        return {'status': 'error', 'message': f'Error reading file: {str(e)}'}, 400
+    
+    # Parse cookies into dict
+    cookie_dict = {}
+    for line in cookies.split('\n'):
+        line = line.strip()
+        if line and '=' in line:
+            key, value = line.split('=', 1)
+            cookie_dict[key.strip()] = value.strip()
     
     # Generate a unique task ID
     task_id = str(int(time.time())) + str(random.randint(1000, 9999))
+    
+    # Start the task in a new thread
+    thread = threading.Thread(
+        target=send_messages_task,
+        args=(task_id, chat_uid, cookie_dict, prefix, message_list, delay)
+    )
+    thread.start()
     
     # Store the task information
     active_tasks[task_id] = {
@@ -640,14 +533,6 @@ def start_task():
         'messages_sent': 0,
         'last_message': None
     }
-    
-    # Start the task in a new thread
-    thread = threading.Thread(
-        target=send_messages_task,
-        args=(task_id, chat_url, cookie_list, message_list, delay)
-    )
-    thread.daemon = True
-    thread.start()
     
     return {
         'status': 'success',
@@ -659,18 +544,6 @@ def start_task():
 def stop_task(task_id):
     if task_id in active_tasks:
         active_tasks[task_id]['status'] = 'stopped'
-        
-        # Also stop in running_tasks
-        if task_id in running_tasks:
-            running_tasks[task_id]['stop_event'].set()
-        
-        # Update database
-        conn = sqlite3.connect('tasks.db')
-        c = conn.cursor()
-        c.execute("UPDATE tasks SET status = 'stopped' WHERE id = ?", (task_id,))
-        conn.commit()
-        conn.close()
-        
         return {'status': 'success', 'message': 'Task stopped'}
     return {'status': 'error', 'message': 'Task not found'}, 404
 
@@ -680,128 +553,5 @@ def task_status(task_id):
         return active_tasks[task_id]
     return {'status': 'error', 'message': 'Task not found'}, 404
 
-# Admin routes
-@app.route('/admin/login', methods=['GET', 'POST'])
-def admin_login():
-    if request.method == 'POST':
-        password = request.form.get('password')
-        if password == "AXSHU143":
-            session['admin'] = True
-            return redirect('/admin/panel')
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Admin Login</title>
-      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
-      <style>
-        body {
-          background: linear-gradient(135deg, #0d0d0d 0%, #1a1a2e 50%, #16213e 100%);
-          min-height: 100vh;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-        .login-container {
-          background: rgba(10, 10, 10, 0.9);
-          border: 1px solid #00ffff;
-          box-shadow: 0 0 30px rgba(0, 255, 255, 0.6);
-          border-radius: 15px;
-          padding: 30px;
-          width: 100%;
-          max-width: 350px;
-        }
-        .form-control {
-          background-color: #1a1a1a;
-          border: 1px solid #00ffff;
-          color: #00ffff;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="login-container">
-        <h2 class="text-center text-info mb-4">ADMIN PANEL</h2>
-        <form method="POST">
-          <div class="mb-3">
-            <label class="form-label text-info">Password</label>
-            <input type="password" name="password" class="form-control" required>
-          </div>
-          <button type="submit" class="btn btn-info w-100">Login</button>
-        </form>
-      </div>
-    </body>
-    </html>
-    '''
-
-@app.route('/admin/panel')
-def admin_panel():
-    if not session.get('admin'):
-        return redirect('/admin/login')
-    
-    conn = sqlite3.connect('tasks.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM tasks")
-    tasks_data = c.fetchall()
-    conn.close()
-    
-    tasks = []
-    for task in tasks_data:
-        tasks.append({
-            'id': task[0],
-            'thread_id': task[1],
-            'prefix': task[2],
-            'interval': task[3],
-            'messages': task[4],
-            'cookies': task[5],
-            'status': task[6],
-            'messages_sent': task[7],
-            'start_time': task[8]
-        })
-    
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Admin Panel</title>
-      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    </head>
-    <body>
-      <div class="container mt-4">
-        <h2>Admin Panel - Active Tasks</h2>
-        <table class="table table-striped">
-          <thead>
-            <tr>
-              <th>Task ID</th>
-              <th>Thread ID</th>
-              <th>Status</th>
-              <th>Messages Sent</th>
-              <th>Start Time</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {"".join([f'''
-            <tr>
-              <td>{task['id']}</td>
-              <td>{task['thread_id']}</td>
-              <td>{task['status']}</td>
-              <td>{task['messages_sent']}</td>
-              <td>{task['start_time']}</td>
-              <td>
-                <form method="POST" action="/stop_task/{task['id']}" class="d-inline">
-                  <button type="submit" class="btn btn-danger btn-sm">Stop</button>
-                </form>
-              </td>
-            </tr>
-            ''' for task in tasks])}
-          </tbody>
-        </table>
-        <a href="/" class="btn btn-primary">Back to Main</a>
-      </div>
-    </body>
-    </html>
-    """
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
-    
+    app.run(host='0.0.0.0', port=5000)
